@@ -1,0 +1,9 @@
+@echo off
+echo Starting SmartDB-Doc Oracle Documentation Tool...
+echo.
+echo Checking for Python dependencies...
+pip install streamlit SQLAlchemy python-docx oracledb openai pandas
+echo.
+echo Launching Streamlit app...
+streamlit run app.py
+pause
