@@ -29,7 +29,10 @@ def get_engine(db_type, host, port, user, password, database):
     if db_type == "YashanDB":
         if YASDB_AVAILABLE:
             # 使用 yasdb 直接连接
-            print(f"Using yasdb direct connection with host={host}, port={port}, user={user}, dsn={database}")
+            # YashanDB Python 驱动支持以下连接方式：
+            # 1. 使用 dsn、user、password 参数 (dsn 格式: host:port)
+            # 2. 使用 host、port、user、password 参数
+            print(f"Using yasdb direct connection with host={host}, port={port}, user={user}")
             return {
                 "type": "yasdb",
                 "connection": {
@@ -37,7 +40,7 @@ def get_engine(db_type, host, port, user, password, database):
                     "port": port,
                     "user": user,
                     "password": password,
-                    "dsn": database
+                    "database": database
                 }
             }
         else:
@@ -81,18 +84,17 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
         port = conn_info['port']
         user = conn_info['user']
         password = conn_info['password']
-        dsn = conn_info['dsn']
         
         if not schema:
-            schema = 'public'
+            schema = user.upper()
         
         try:
+            # 使用 dsn 格式: host:port
+            dsn = f"{host}:{port}"
             conn = yasdb.connect(
-                host=host,
-                port=int(port),
+                dsn=dsn,
                 user=user,
-                password=password,
-                dsn=dsn
+                password=password
             )
             cursor = conn.cursor()
             
@@ -227,17 +229,17 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
     port = conn_info['port']
     user = conn_info['user']
     password = conn_info['password']
-    dsn = conn_info['dsn']
     
-    print(f"YashanDB connection params: host={host}, port={port}, user={user}, dsn={dsn}")
+    print(f"YashanDB connection params: host={host}, port={port}, user={user}")
     
-    # 建立连接
+    # 建立连接 - 使用 dsn 格式: host:port
+    dsn = f"{host}:{port}"
+    print(f"Connecting to YashanDB with dsn={dsn}, user={user}")
+    
     conn = yasdb.connect(
-        host=host,
-        port=int(port),
+        dsn=dsn,
         user=user,
-        password=password,
-        dsn=dsn
+        password=password
     )
     
     cursor = conn.cursor()
@@ -247,6 +249,8 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
         # 处理默认 Schema (YashanDB 默认通常是用户名大写)
         if not target_schema:
             target_schema = user.upper()
+        
+        print(f"Querying tables in schema: {target_schema}")
         
         # 获取表名列表
         if scope_type == "全库" or scope_type == "指定 Schema":
@@ -268,8 +272,12 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
             cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_type = 'BASE TABLE'")
             table_names = [row[0] for row in cursor.fetchall()]
         
+        print(f"Found {len(table_names)} tables: {table_names}")
+        
         # 遍历表获取详细信息
         for table_name in table_names:
+            print(f"Processing table: {table_name}")
+            
             # 获取表注释
             cursor.execute(f"SELECT table_comment FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_name = '{table_name}'")
             table_comment_row = cursor.fetchone()
