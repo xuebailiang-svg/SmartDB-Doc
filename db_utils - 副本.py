@@ -9,10 +9,8 @@ import os
 try:
     import yasdb
     YASDB_AVAILABLE = True
-    print('YASDB_AVAILABLE = True')
-except ImportError as e:
+except ImportError:
     YASDB_AVAILABLE = False
-    print('YASDB_AVAILABLE = False, error:', str(e))
 
 # 尝试初始化 Oracle Client (Thick Mode)
 try:
@@ -25,23 +23,18 @@ def get_engine(db_type, host, port, user, password, database):
     """
     创建多数据库引擎，适配 Oracle, MySQL, PostgreSQL, SQL Server, YashanDB
     """
-    print(f"get_engine called with: db_type={db_type}, host={host}, port={port}, user={user}, database={database}")
-    if db_type == "YashanDB":
-        if YASDB_AVAILABLE:
-            # 使用 yasdb 直接连接
-            print(f"Using yasdb direct connection with host={host}, port={port}, user={user}, dsn={database}")
-            return {
-                "type": "yasdb",
-                "connection": {
-                    "host": host,
-                    "port": port,
-                    "user": user,
-                    "password": password,
-                    "dsn": database
-                }
+    if db_type == "YashanDB" and YASDB_AVAILABLE:
+        # 使用 yasdb 直接连接
+        return {
+            "type": "yasdb",
+            "connection": {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "db": database
             }
-        else:
-            raise ImportError("YashanDB Python driver (yasdb) is not installed. Please install it first.")
+        }
     elif db_type == "MySQL":
         # 使用 pymysql 驱动
         url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
@@ -75,7 +68,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
         port = conn_info['port']
         user = conn_info['user']
         password = conn_info['password']
-        dsn = conn_info['dsn']
+        database = conn_info['database']
         
         if not schema:
             schema = 'public'
@@ -86,7 +79,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
                 port=int(port),
                 user=user,
                 password=password,
-                dsn=dsn
+                db=database
             )
             cursor = conn.cursor()
             
@@ -217,9 +210,7 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
     port = conn_info['port']
     user = conn_info['user']
     password = conn_info['password']
-    dsn = conn_info['dsn']
-    
-    print(f"YashanDB connection params: host={host}, port={port}, user={user}, dsn={dsn}")
+    database = conn_info['db']
     
     # 建立连接
     conn = yasdb.connect(
@@ -227,7 +218,7 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
         port=int(port),
         user=user,
         password=password,
-        dsn=dsn
+        db=database
     )
     
     cursor = conn.cursor()
