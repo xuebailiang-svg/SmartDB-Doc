@@ -41,7 +41,13 @@ def get_engine(db_type, host, port, user, password, database):
                 }
             }
         else:
-            raise ImportError("YashanDB Python driver (yasdb) is not installed. Please install it first.")
+            # 尝试使用 sqlalchemy 方言 (如果已安装 yashandb_sqlalchemy)
+            try:
+                url = f"yashandb://{user}:{password}@{host}:{port}/{database}"
+                engine = create_engine(url, pool_pre_ping=True)
+                return engine
+            except Exception as e:
+                raise ImportError(f"YashanDB Python driver (yasdb) is not installed and SQLAlchemy dialect failed: {e}")
     elif db_type == "MySQL":
         # 使用 pymysql 驱动
         url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
@@ -68,7 +74,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
     """
     抓取不同数据库的前 N 行样本数据
     """
-    # 处理 YashanDB 特殊情况
+    # 处理 YashanDB 特殊情况 (直接连接模式)
     if isinstance(engine, dict) and engine.get('type') == 'yasdb':
         conn_info = engine['connection']
         host = conn_info['host']
@@ -90,6 +96,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
             )
             cursor = conn.cursor()
             
+            # YashanDB 支持 LIMIT 语法
             cursor.execute(f"SELECT * FROM {schema}.{table_name} LIMIT {limit}")
             rows = cursor.fetchall()
             
@@ -116,6 +123,8 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
         full_table_name = f'`{table_name}`'
     elif db_type == 'mssql':
         full_table_name = f'[{schema}].[{table_name}]' if schema else f'[{table_name}]'
+    elif db_type == 'yashandb':
+        full_table_name = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
     else:
         full_table_name = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
     
@@ -124,7 +133,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
         query = f"SELECT * FROM (SELECT * FROM {full_table_name}) WHERE ROWNUM <= {limit}"
     elif db_type == 'mssql':
         query = f"SELECT TOP {limit} * FROM {full_table_name}"
-    else: # MySQL, PostgreSQL
+    else: # MySQL, PostgreSQL, YashanDB
         query = f"SELECT * FROM {full_table_name} LIMIT {limit}"
         
     try:
@@ -139,7 +148,7 @@ def get_schema_metadata(engine, scope_type="全库", target_schema=None, target_
     """
     提取数据库元数据，支持范围筛选和样本数据采样
     """
-    # 处理 YashanDB 特殊情况
+    # 处理 YashanDB 特殊情况 (直接连接模式)
     if isinstance(engine, dict) and engine.get('type') == 'yasdb':
         return get_yashandb_metadata(engine, scope_type, target_schema, target_tables, enable_sampling)
     
@@ -155,7 +164,8 @@ def get_schema_metadata(engine, scope_type="全库", target_schema=None, target_
             target_schema = 'public'
         elif db_type == 'mssql':
             target_schema = 'dbo'
-        # MySQL 通常不需要指定 schema，因为连接时已指定 database
+        elif db_type == 'yashandb':
+            target_schema = engine.url.username.upper()
     
     # 获取表名列表
     if scope_type == "全库" or scope_type == "指定 Schema":
@@ -234,14 +244,14 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
     tables_metadata = []
     
     try:
-        # 处理默认 Schema
+        # 处理默认 Schema (YashanDB 默认通常是用户名大写)
         if not target_schema:
-            target_schema = 'public'
+            target_schema = user.upper()
         
         # 获取表名列表
         if scope_type == "全库" or scope_type == "指定 Schema":
             # 查询指定 schema 下的所有表
-            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}'")
+            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_type = 'BASE TABLE'")
             table_names = [row[0] for row in cursor.fetchall()]
         elif scope_type == "指定表":
             if target_tables:
@@ -255,7 +265,7 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
             else:
                 table_names = []
         else:
-            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}'")
+            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_type = 'BASE TABLE'")
             table_names = [row[0] for row in cursor.fetchall()]
         
         # 遍历表获取详细信息
@@ -266,11 +276,11 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
             table_comment = table_comment_row[0] if table_comment_row else ""
             
             # 获取列信息
-            cursor.execute(f"SELECT column_name, data_type, is_nullable, column_default, column_comment FROM information_schema.columns WHERE table_schema = '{target_schema}' AND table_name = '{table_name}'")
+            cursor.execute(f"SELECT column_name, data_type, is_nullable, column_default, column_comment FROM information_schema.columns WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' ORDER BY ordinal_position")
             columns = cursor.fetchall()
             
             # 获取主键信息
-            cursor.execute(f"SELECT column_name FROM information_schema.key_column_usage WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_name = (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_type = 'PRIMARY KEY')")
+            cursor.execute(f"SELECT column_name FROM information_schema.key_column_usage WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_name IN (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_type = 'PRIMARY KEY')")
             pk_columns = [row[0] for row in cursor.fetchall()]
             
             # 构建列元数据

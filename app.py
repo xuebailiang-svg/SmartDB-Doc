@@ -123,7 +123,7 @@ if connect_btn:
         elif db_type == "SQL Server":
             st.info("提示：请确保已安装 ODBC Driver 17/18 for SQL Server。")
         elif db_type == "YashanDB":
-            st.info("提示：请确保已安装 YashanDB Python 驱动 (python-yasdb) 和 yashandb_sqlalchemy 方言库。")
+            st.info("提示：请确保已安装 YashanDB Python 驱动 (yasdb)。如果使用 SQLAlchemy 模式，还需安装 yashandb_sqlalchemy 方言库。")
 
 # 主界面展示
 if st.session_state.metadata:
