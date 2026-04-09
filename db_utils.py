@@ -29,9 +29,6 @@ def get_engine(db_type, host, port, user, password, database):
     if db_type == "YashanDB":
         if YASDB_AVAILABLE:
             # 使用 yasdb 直接连接
-            # YashanDB Python 驱动支持以下连接方式：
-            # 1. 使用 dsn、user、password 参数 (dsn 格式: host:port)
-            # 2. 使用 host、port、user、password 参数
             print(f"Using yasdb direct connection with host={host}, port={port}, user={user}")
             return {
                 "type": "yasdb",
@@ -85,11 +82,11 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
         user = conn_info['user']
         password = conn_info['password']
         
-        if not schema:
-            schema = user.upper()
+        # YashanDB 中通常直接使用表名即可访问当前用户的表
+        # 如果指定了 schema，则使用 schema.table_name
+        full_name = f'"{schema}"."{table_name}"' if schema else f'"{table_name}"'
         
         try:
-            # 使用 dsn 格式: host:port
             dsn = f"{host}:{port}"
             conn = yasdb.connect(
                 dsn=dsn,
@@ -99,7 +96,7 @@ def get_sample_data(engine, table_name, schema=None, limit=5):
             cursor = conn.cursor()
             
             # YashanDB 支持 LIMIT 语法
-            cursor.execute(f"SELECT * FROM {schema}.{table_name} LIMIT {limit}")
+            cursor.execute(f"SELECT * FROM {full_name} LIMIT {limit}")
             rows = cursor.fetchall()
             
             # 获取列名
@@ -222,7 +219,8 @@ def get_schema_metadata(engine, scope_type="全库", target_schema=None, target_
 
 def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None, target_tables=None, enable_sampling=False):
     """
-    使用 yasdb 直接获取 YashanDB 元数据
+    使用 yasdb 直接获取 YashanDB 元数据，适配 23.4 版本
+    使用 Oracle 兼容的系统视图 (USER_TABLES, USER_TAB_COLUMNS 等)
     """
     conn_info = engine_config['connection']
     host = conn_info['host']
@@ -230,9 +228,6 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
     user = conn_info['user']
     password = conn_info['password']
     
-    print(f"YashanDB connection params: host={host}, port={port}, user={user}")
-    
-    # 建立连接 - 使用 dsn 格式: host:port
     dsn = f"{host}:{port}"
     print(f"Connecting to YashanDB with dsn={dsn}, user={user}")
     
@@ -246,49 +241,51 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
     tables_metadata = []
     
     try:
-        # 处理默认 Schema (YashanDB 默认通常是用户名大写)
-        if not target_schema:
-            target_schema = user.upper()
-        
-        print(f"Querying tables in schema: {target_schema}")
-        
-        # 获取表名列表
-        if scope_type == "全库" or scope_type == "指定 Schema":
-            # 查询指定 schema 下的所有表
-            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_type = 'BASE TABLE'")
-            table_names = [row[0] for row in cursor.fetchall()]
-        elif scope_type == "指定表":
-            if target_tables:
-                requested_tables = [t.strip() for t in target_tables.split(',') if t.strip()]
-                # 查询指定表是否存在
-                table_names = []
-                for table in requested_tables:
-                    cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_name = '{table}'")
-                    if cursor.fetchone():
-                        table_names.append(table)
-            else:
-                table_names = []
+        # 1. 获取表名列表和注释
+        # 如果是“全库”或“指定 Schema”，我们查询当前用户或指定用户的表
+        # 注意：YashanDB 的 USER_TABLES 只显示当前用户的表
+        if scope_type == "指定 Schema" and target_schema and target_schema.upper() != user.upper():
+            # 查询指定 Schema (需要有权限访问 ALL_TABLES)
+            table_query = f"SELECT t.TABLE_NAME, c.COMMENTS FROM ALL_TABLES t LEFT JOIN ALL_TAB_COMMENTS c ON t.TABLE_NAME = c.TABLE_NAME AND t.OWNER = c.OWNER WHERE t.OWNER = '{target_schema.upper()}'"
+            owner_filter = target_schema.upper()
         else:
-            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_type = 'BASE TABLE'")
-            table_names = [row[0] for row in cursor.fetchall()]
+            # 默认查询当前用户的表
+            table_query = "SELECT t.TABLE_NAME, c.COMMENTS FROM USER_TABLES t LEFT JOIN USER_TAB_COMMENTS c ON t.TABLE_NAME = c.TABLE_NAME"
+            owner_filter = user.upper()
+
+        if scope_type == "指定表" and target_tables:
+            requested_tables = [f"'{t.strip().upper()}'" for t in target_tables.split(',') if t.strip()]
+            if requested_tables:
+                table_query += f" AND t.TABLE_NAME IN ({','.join(requested_tables)})"
+
+        print(f"Executing table query: {table_query}")
+        cursor.execute(table_query)
+        table_info = cursor.fetchall()
         
-        print(f"Found {len(table_names)} tables: {table_names}")
-        
-        # 遍历表获取详细信息
-        for table_name in table_names:
+        for table_name, table_comment in table_info:
             print(f"Processing table: {table_name}")
             
-            # 获取表注释
-            cursor.execute(f"SELECT table_comment FROM information_schema.tables WHERE table_schema = '{target_schema}' AND table_name = '{table_name}'")
-            table_comment_row = cursor.fetchone()
-            table_comment = table_comment_row[0] if table_comment_row else ""
-            
-            # 获取列信息
-            cursor.execute(f"SELECT column_name, data_type, is_nullable, column_default, column_comment FROM information_schema.columns WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' ORDER BY ordinal_position")
+            # 2. 获取列信息
+            if owner_filter == user.upper():
+                col_query = f"SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT FROM USER_TAB_COLUMNS WHERE TABLE_NAME = '{table_name}' ORDER BY COLUMN_ID"
+                comm_query = f"SELECT COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME = '{table_name}'"
+            else:
+                col_query = f"SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT FROM ALL_TAB_COLUMNS WHERE TABLE_NAME = '{table_name}' AND OWNER = '{owner_filter}' ORDER BY COLUMN_ID"
+                comm_query = f"SELECT COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS WHERE TABLE_NAME = '{table_name}' AND OWNER = '{owner_filter}'"
+
+            cursor.execute(col_query)
             columns = cursor.fetchall()
             
-            # 获取主键信息
-            cursor.execute(f"SELECT column_name FROM information_schema.key_column_usage WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_name IN (SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND constraint_type = 'PRIMARY KEY')")
+            cursor.execute(comm_query)
+            comments_dict = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # 3. 获取主键信息
+            if owner_filter == user.upper():
+                pk_query = f"SELECT COLUMN_NAME FROM USER_CONS_COLUMNS WHERE CONSTRAINT_NAME IN (SELECT CONSTRAINT_NAME FROM USER_CONSTRAINTS WHERE TABLE_NAME = '{table_name}' AND CONSTRAINT_TYPE = 'P')"
+            else:
+                pk_query = f"SELECT COLUMN_NAME FROM ALL_CONS_COLUMNS WHERE OWNER = '{owner_filter}' AND CONSTRAINT_NAME IN (SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS WHERE TABLE_NAME = '{table_name}' AND OWNER = '{owner_filter}' AND CONSTRAINT_TYPE = 'P')"
+            
+            cursor.execute(pk_query)
             pk_columns = [row[0] for row in cursor.fetchall()]
             
             # 构建列元数据
@@ -297,49 +294,63 @@ def get_yashandb_metadata(engine_config, scope_type="全库", target_schema=None
                 cols_metadata.append({
                     "name": col[0],
                     "type": col[1],
-                    "nullable": col[2] == 'YES',
-                    "default": col[3] or "",
+                    "nullable": col[2] == 'Y',
+                    "default": str(col[3]) if col[3] is not None else "",
                     "is_pk": col[0] in pk_columns,
-                    "comment": col[4] or ""
+                    "comment": comments_dict.get(col[0], "") or ""
                 })
             
-            # 获取外键信息
+            # 4. 获取外键信息
             fk_constraints = []
-            cursor.execute(f"SELECT constraint_name, column_name, referenced_table_schema, referenced_table_name, referenced_column_name FROM information_schema.key_column_usage WHERE table_schema = '{target_schema}' AND table_name = '{table_name}' AND referenced_table_name IS NOT NULL")
+            if owner_filter == user.upper():
+                fk_query = f"""
+                    SELECT a.CONSTRAINT_NAME, a.COLUMN_NAME, b.OWNER as REFERRED_SCHEMA, b.TABLE_NAME as REFERRED_TABLE, b.COLUMN_NAME as REFERRED_COLUMN
+                    FROM USER_CONS_COLUMNS a
+                    JOIN USER_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+                    JOIN USER_CONS_COLUMNS b ON c.R_CONSTRAINT_NAME = b.CONSTRAINT_NAME
+                    WHERE c.TABLE_NAME = '{table_name}' AND c.CONSTRAINT_TYPE = 'R'
+                """
+            else:
+                fk_query = f"""
+                    SELECT a.CONSTRAINT_NAME, a.COLUMN_NAME, b.OWNER as REFERRED_SCHEMA, b.TABLE_NAME as REFERRED_TABLE, b.COLUMN_NAME as REFERRED_COLUMN
+                    FROM ALL_CONS_COLUMNS a
+                    JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME AND a.OWNER = c.OWNER
+                    JOIN ALL_CONS_COLUMNS b ON c.R_CONSTRAINT_NAME = b.CONSTRAINT_NAME AND c.R_OWNER = b.OWNER
+                    WHERE c.TABLE_NAME = '{table_name}' AND c.OWNER = '{owner_filter}' AND c.CONSTRAINT_TYPE = 'R'
+                """
+            
+            cursor.execute(fk_query)
             fk_rows = cursor.fetchall()
             
-            # 按约束名分组
             fk_dict = {}
             for row in fk_rows:
-                constraint_name = row[0]
-                if constraint_name not in fk_dict:
-                    fk_dict[constraint_name] = {
-                        "name": constraint_name,
+                c_name = row[0]
+                if c_name not in fk_dict:
+                    fk_dict[c_name] = {
+                        "name": c_name,
                         "constrained_columns": [],
                         "referred_schema": row[2],
                         "referred_table": row[3],
                         "referred_columns": []
                     }
-                fk_dict[constraint_name]["constrained_columns"].append(row[1])
-                fk_dict[constraint_name]["referred_columns"].append(row[4])
+                fk_dict[c_name]["constrained_columns"].append(row[1])
+                fk_dict[c_name]["referred_columns"].append(row[4])
             
             fk_constraints = list(fk_dict.values())
             
-            # 获取样本数据
+            # 5. 获取样本数据
             sample_data = []
             if enable_sampling:
                 try:
-                    cursor.execute(f"SELECT * FROM {target_schema}.{table_name} LIMIT 5")
+                    full_table_name = f'"{owner_filter}"."{table_name}"'
+                    cursor.execute(f"SELECT * FROM {full_table_name} LIMIT 5")
                     rows = cursor.fetchall()
-                    # 获取列名
                     column_names = [desc[0] for desc in cursor.description]
-                    # 构建样本数据
                     for row in rows:
                         sample_data.append(dict(zip(column_names, row)))
                 except Exception as e:
                     print(f"Failed to fetch sample data for {table_name}: {e}")
             
-            # 添加表元数据
             tables_metadata.append({
                 "table_name": table_name,
                 "table_comment": table_comment or "",
